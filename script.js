@@ -63,14 +63,63 @@ let nextFlashTime = 3 + Math.random() * 8; // seconds until next flash
 
 /* //////////////////////////////////////// */
 
-// Audio Elements
-const rainAudio = new Audio("rain.mp3");
-let thunderEnabled = true;
-let thunderSounds = [];
+// WEB AUDIO API SETUP
+let audioCtx = null;
+let analyser = null;
+let analyserData = null;
+let thunderBuffers = []; // pre-loaded AudioBuffers
+let audioInitialized = false;
+
+function initAudioContext() {
+  if (audioInitialized) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+  // Create analyser node for reading thunder amplitude
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  analyser.smoothingTimeConstant = 0.3;
+  analyserData = new Uint8Array(analyser.fftSize);
+
+  // Connect analyser to destination so thunder is audible
+  analyser.connect(audioCtx.destination);
+
+  audioInitialized = true;
+  console.log("Web Audio API initialized");
+}
+
+// Pre-load thunder sounds as AudioBuffers for low-latency playback
+async function preloadThunderBuffers() {
+  try {
+    const response = await fetch("thunder-sounds.json");
+    const soundPaths = await response.json();
+    console.log("Loading thunder sounds:", soundPaths);
+
+    const loadPromises = soundPaths.map(async (path) => {
+      try {
+        const resp = await fetch(path);
+        const arrayBuffer = await resp.arrayBuffer();
+        const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+        return audioBuffer;
+      } catch (err) {
+        console.warn("Failed to load thunder sound:", path, err);
+        return null;
+      }
+    });
+
+    const buffers = await Promise.all(loadPromises);
+    thunderBuffers = buffers.filter((b) => b !== null);
+    console.log("Thunder buffers loaded:", thunderBuffers.length);
+  } catch (error) {
+    console.error("Error loading thunder sounds:", error);
+  }
+}
 
 /* //////////////////////////////////////// */
 
-// Attempt to Play Rain Sound
+// Rain Audio - using standard Audio element (continuous loop)
+const rainAudio = new Audio("rain.mp3");
+let thunderEnabled = true;
+
 function playRainSound() {
   rainAudio.loop = true;
   rainAudio.volume = 0.5;
@@ -83,33 +132,42 @@ function playRainSound() {
       console.error("Rain sound autoplay blocked. Waiting for user interaction.");
       document.body.addEventListener("click", () => {
         rainAudio.play().catch((err) => console.error("Error playing rain sound:", err));
-      });
+      }, { once: true });
     });
 }
 
 /* //////////////////////////////////////// */
 
-// Fetch Thunder Sounds from JSON and Start Playing
-async function fetchThunderSounds() {
-  try {
-    const response = await fetch("thunder-sounds.json");
-    thunderSounds = await response.json();
-    console.log("Thunder sounds loaded:", thunderSounds);
-    playRandomThunder();
-  } catch (error) {
-    console.error("Error fetching thunder sounds:", error);
-  }
+// Play a thunder sound through the Web Audio API analyser
+function playThunderThroughAnalyser() {
+  if (!thunderEnabled || thunderBuffers.length === 0 || !audioCtx) return;
+
+  const buffer = thunderBuffers[Math.floor(Math.random() * thunderBuffers.length)];
+  const source = audioCtx.createBufferSource();
+  source.buffer = buffer;
+
+  // Route through analyser so we can read amplitude
+  source.connect(analyser);
+  source.start(0);
 }
 
-// Play a Random Thunder Sound
-function playRandomThunder() {
-  if (!thunderEnabled || thunderSounds.length === 0) return;
+/* //////////////////////////////////////// */
 
-  const randomSound = thunderSounds[Math.floor(Math.random() * thunderSounds.length)];
-  const thunderAudio = new Audio(randomSound);
-  thunderAudio.play().catch((err) => console.error("Error playing thunder sound:", err));
+// Get peak amplitude from the analyser (0-1 range)
+function getThunderAmplitude() {
+  if (!analyser || !analyserData) return 0;
 
-  setTimeout(playRandomThunder, 4000 + Math.random() * 19000);
+  analyser.getByteTimeDomainData(analyserData);
+
+  // Find peak deviation from silence (128)
+  let peak = 0;
+  for (let i = 0; i < analyserData.length; i++) {
+    let deviation = Math.abs(analyserData[i] - 128);
+    if (deviation > peak) peak = deviation;
+  }
+
+  // Normalize to 0-1
+  return peak / 128;
 }
 
 /* //////////////////////////////////////// */
@@ -219,7 +277,7 @@ document.body.appendChild(flashOverlay);
 
 /* //////////////////////////////////////// */
 
-// Function to trigger a lightning strike
+// Function to trigger a lightning strike with audio sync
 function triggerLightning() {
   // Random position in the sky
   flash.position.set(
@@ -240,12 +298,19 @@ function triggerLightning() {
   nextFlashTime = 4 + Math.random() * 12;
   timeSinceLastFlash = 0;
 
-  // Sometimes do a double-flash (very realistic)
+  // Sometimes do a double-flash (50% chance of a quick re-flash)
   if (Math.random() > 0.5) {
     setTimeout(() => {
       flashPower = Math.max(flashPower, 150 + Math.random() * 300);
     }, 80 + Math.random() * 120);
   }
+
+  // Play thunder audio after a delay (light arrives before sound)
+  // Delay: 40-180ms to simulate speed-of-light vs speed-of-sound
+  let audioDelay = 40 + Math.random() * 140;
+  setTimeout(() => {
+    playThunderThroughAnalyser();
+  }, audioDelay);
 }
 
 /* //////////////////////////////////////// */
@@ -288,6 +353,14 @@ function render() {
   });
   rainGeo.verticesNeedUpdate = true;
   rain.rotation.y += 0.001;
+
+  // Read thunder amplitude from analyser and boost flash accordingly
+  let amplitude = getThunderAmplitude();
+  if (amplitude > 0.05) {
+    // Map amplitude to flash power — loud cracks = bright flashes, rumbles = subtle flickers
+    let amplitudeBoost = amplitude * 500;
+    flashPower = Math.max(flashPower, amplitudeBoost);
+  }
 
   // Lightning flash decay
   if (flashPower > 0.5) {
@@ -368,7 +441,7 @@ window.addEventListener("resize", resizeRendererToWindow);
 
 // Add Thunder Toggle Button
 const toggleButton = document.createElement("button");
-toggleButton.textContent = "⚡";
+toggleButton.textContent = "\u26A1";
 toggleButton.style.position = "fixed";
 toggleButton.style.bottom = "10px";
 toggleButton.style.left = "10px";
@@ -392,6 +465,25 @@ toggleButton.addEventListener("click", () => {
 
 /* //////////////////////////////////////// */
 
-// Fetch thunder sounds, play rain sound, and start the simulation
-playRainSound();
-fetchThunderSounds();
+// Initialize audio on first user interaction (required by browsers)
+function startAudio() {
+  initAudioContext();
+  if (audioCtx.state === "suspended") {
+    audioCtx.resume();
+  }
+  playRainSound();
+  preloadThunderBuffers();
+}
+
+// Try to start immediately, fall back to click
+document.addEventListener("click", function onFirstClick() {
+  startAudio();
+  document.removeEventListener("click", onFirstClick);
+}, { once: true });
+
+// Also try on page load (will work if autoplay policy allows)
+try {
+  startAudio();
+} catch (e) {
+  console.log("Audio autoplay blocked, waiting for user interaction");
+}
