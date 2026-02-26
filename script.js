@@ -57,20 +57,139 @@ scene.add(ambientFlash);
 
 // Lightning state
 let flashPower = 0;
-let flashDecay = 0.92; // how quickly flash fades
-let timeSinceLastFlash = 0;
-let nextFlashTime = 3 + Math.random() * 8; // seconds until next flash
+let flashDecay = 0.92;
 
 /* //////////////////////////////////////// */
 
-// Audio Elements
-const rainAudio = new Audio("rain.mp3");
+// WEB AUDIO API - for real-time thunder analysis
+let audioCtx = null;
+let thunderAnalyser = null;
+let analyserData = null;
+let thunderBuffers = [];
 let thunderEnabled = true;
-let thunderSounds = [];
+let audioReady = false;
+
+// Initialize AudioContext (requires user gesture on most browsers)
+function initAudio() {
+  if (audioCtx) return;
+
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+  // Analyser node to read thunder waveform in real-time
+  thunderAnalyser = audioCtx.createAnalyser();
+  thunderAnalyser.fftSize = 512;
+  thunderAnalyser.smoothingTimeConstant = 0.4;
+  thunderAnalyser.connect(audioCtx.destination);
+
+  analyserData = new Uint8Array(thunderAnalyser.frequencyBinCount);
+
+  // Connect rain audio through the AudioContext too
+  const rainSource = audioCtx.createMediaElementSource(rainAudio);
+  rainSource.connect(audioCtx.destination);
+
+  // Load thunder buffers
+  loadThunderBuffers();
+}
+
+// Pre-load all thunder sounds as AudioBuffers for low-latency playback
+async function loadThunderBuffers() {
+  try {
+    const response = await fetch("thunder-sounds.json");
+    const soundPaths = await response.json();
+    console.log("Loading thunder sounds:", soundPaths);
+
+    const loadPromises = soundPaths.map(async (path) => {
+      const resp = await fetch(path);
+      const arrayBuffer = await resp.arrayBuffer();
+      return audioCtx.decodeAudioData(arrayBuffer);
+    });
+
+    thunderBuffers = await Promise.all(loadPromises);
+    audioReady = true;
+    console.log(`${thunderBuffers.length} thunder sounds decoded and ready`);
+
+    // Start the thunder cycle
+    scheduleNextThunder();
+  } catch (error) {
+    console.error("Error loading thunder sounds:", error);
+  }
+}
 
 /* //////////////////////////////////////// */
 
-// Attempt to Play Rain Sound
+// THUNDER PLAYBACK - synced to lightning
+
+let nextThunderTimeout = null;
+
+function scheduleNextThunder() {
+  if (nextThunderTimeout) clearTimeout(nextThunderTimeout);
+  const delay = 6000 + Math.random() * 18000;
+  nextThunderTimeout = setTimeout(playThunder, delay);
+}
+
+function playThunder() {
+  if (!thunderEnabled || !audioReady || thunderBuffers.length === 0) {
+    scheduleNextThunder();
+    return;
+  }
+
+  // Pick a random thunder sound
+  const buffer = thunderBuffers[Math.floor(Math.random() * thunderBuffers.length)];
+
+  // 1) VISUAL FLASH FIRST — lightning arrives before sound
+  //    Randomize flash position in the sky
+  flash.position.set(
+    Math.random() * 400 - 200,
+    300 + Math.random() * 200,
+    50 + Math.random() * 100
+  );
+  flash2.position.set(
+    flash.position.x + (Math.random() * 200 - 100),
+    flash.position.y + Math.random() * 100,
+    flash.position.z - 50
+  );
+
+  // Initial bright flash (the "lightning bolt" moment)
+  flashPower = 250 + Math.random() * 350;
+
+  // 2) AUDIO STARTS after a short delay (simulating proximity)
+  //    Close strike: ~50ms delay. Distant: ~200ms.
+  const soundDelay = 40 + Math.random() * 180;
+
+  setTimeout(() => {
+    const source = audioCtx.createBufferSource();
+    source.buffer = buffer;
+    // Route through the analyser so we can read the waveform
+    source.connect(thunderAnalyser);
+    source.start();
+  }, soundDelay);
+
+  // Schedule the next thunder
+  scheduleNextThunder();
+}
+
+// Read real-time thunder amplitude from the analyser
+function getThunderAmplitude() {
+  if (!thunderAnalyser || !analyserData) return 0;
+
+  thunderAnalyser.getByteTimeDomainData(analyserData);
+
+  // Find peak deviation from silence (128 = silence in unsigned byte domain)
+  let peak = 0;
+  for (let i = 0; i < analyserData.length; i++) {
+    const deviation = Math.abs(analyserData[i] - 128);
+    if (deviation > peak) peak = deviation;
+  }
+
+  // Normalize to 0–1
+  return peak / 128;
+}
+
+/* //////////////////////////////////////// */
+
+// Rain Audio (simple HTML5 Audio element, routed through AudioContext later)
+const rainAudio = new Audio("rain.mp3");
+
 function playRainSound() {
   rainAudio.loop = true;
   rainAudio.volume = 0.5;
@@ -81,36 +200,23 @@ function playRainSound() {
     })
     .catch((err) => {
       console.error("Rain sound autoplay blocked. Waiting for user interaction.");
-      document.body.addEventListener("click", () => {
-        rainAudio.play().catch((err) => console.error("Error playing rain sound:", err));
-      });
     });
 }
 
-/* //////////////////////////////////////// */
+// On first user interaction, initialize AudioContext and resume playback
+function onFirstInteraction() {
+  initAudio();
 
-// Fetch Thunder Sounds from JSON and Start Playing
-async function fetchThunderSounds() {
-  try {
-    const response = await fetch("thunder-sounds.json");
-    thunderSounds = await response.json();
-    console.log("Thunder sounds loaded:", thunderSounds);
-    playRandomThunder();
-  } catch (error) {
-    console.error("Error fetching thunder sounds:", error);
+  if (audioCtx.state === "suspended") {
+    audioCtx.resume();
   }
+
+  rainAudio.play().catch(() => {});
+  document.removeEventListener("click", onFirstInteraction);
+  document.removeEventListener("keydown", onFirstInteraction);
 }
-
-// Play a Random Thunder Sound
-function playRandomThunder() {
-  if (!thunderEnabled || thunderSounds.length === 0) return;
-
-  const randomSound = thunderSounds[Math.floor(Math.random() * thunderSounds.length)];
-  const thunderAudio = new Audio(randomSound);
-  thunderAudio.play().catch((err) => console.error("Error playing thunder sound:", err));
-
-  setTimeout(playRandomThunder, 4000 + Math.random() * 19000);
-}
+document.addEventListener("click", onFirstInteraction);
+document.addEventListener("keydown", onFirstInteraction);
 
 /* //////////////////////////////////////// */
 
@@ -121,7 +227,7 @@ rainGeo = new THREE.Geometry();
 
 // Wind parameters
 let windStrength = 0.3;
-let windDirection = -0.5; // slight diagonal
+let windDirection = -0.5;
 
 for (let i = 0; i < rainCount; i++) {
   rainDrop = new THREE.Vector3(
@@ -130,7 +236,6 @@ for (let i = 0; i < rainCount; i++) {
     Math.random() * 400 - 200
   );
   rainDrop.velocity = 0;
-  // Each drop gets its own fall speed multiplier for variation
   rainDrop.speedFactor = 0.6 + Math.random() * 0.8;
   rainGeo.vertices.push(rainDrop);
 }
@@ -150,7 +255,6 @@ scene.add(rain);
 // CLOUD SYSTEM - more layers at varied depths for realistic volume
 let loader = new THREE.TextureLoader();
 loader.load("https://raw.githubusercontent.com/navin-navi/codepen-assets/master/images/smoke.png", function (texture) {
-  // Create a few different cloud sizes for variety
   let cloudSizes = [300, 400, 500, 600, 700];
 
   for (let p = 0; p < 45; p++) {
@@ -164,20 +268,16 @@ loader.load("https://raw.githubusercontent.com/navin-navi/codepen-assets/master/
 
     let cloud = new THREE.Mesh(cloudGeo, cloudMaterial);
 
-    // Spread clouds across the sky at different heights and depths
     let layer = Math.random();
     let yPos, opacity;
 
     if (layer < 0.3) {
-      // High distant clouds - lighter, more transparent
       yPos = 520 + Math.random() * 80;
       opacity = 0.2 + Math.random() * 0.15;
     } else if (layer < 0.7) {
-      // Mid-level clouds - main visible layer
       yPos = 440 + Math.random() * 80;
       opacity = 0.4 + Math.random() * 0.2;
     } else {
-      // Low heavy clouds - darker, more opaque
       yPos = 350 + Math.random() * 90;
       opacity = 0.5 + Math.random() * 0.25;
     }
@@ -192,9 +292,7 @@ loader.load("https://raw.githubusercontent.com/navin-navi/codepen-assets/master/
     cloud.rotation.z = Math.random() * 2 * Math.PI;
     cloud.material.opacity = opacity;
 
-    // Store base opacity for lightning illumination
     cloud.userData.baseOpacity = opacity;
-    // Give each cloud a slightly different rotation speed
     cloud.userData.rotSpeed = 0.0008 + Math.random() * 0.0015;
 
     cloudParticles.push(cloud);
@@ -219,65 +317,42 @@ document.body.appendChild(flashOverlay);
 
 /* //////////////////////////////////////// */
 
-// Function to trigger a lightning strike
-function triggerLightning() {
-  // Random position in the sky
-  flash.position.set(
-    Math.random() * 400 - 200,
-    300 + Math.random() * 200,
-    50 + Math.random() * 100
-  );
-  flash2.position.set(
-    flash.position.x + (Math.random() * 200 - 100),
-    flash.position.y + Math.random() * 100,
-    flash.position.z - 50
-  );
-
-  // Initial flash intensity
-  flashPower = 200 + Math.random() * 400;
-
-  // Schedule next flash
-  nextFlashTime = 4 + Math.random() * 12;
-  timeSinceLastFlash = 0;
-
-  // Sometimes do a double-flash (very realistic)
-  if (Math.random() > 0.5) {
-    setTimeout(() => {
-      flashPower = Math.max(flashPower, 150 + Math.random() * 300);
-    }, 80 + Math.random() * 120);
-  }
-}
-
-/* //////////////////////////////////////// */
-
 // Track time for smooth animations
 let lastTime = performance.now();
 
 // Render animation on every rendering phase
 function render() {
   let now = performance.now();
-  let delta = (now - lastTime) / 1000; // seconds
+  let delta = (now - lastTime) / 1000;
   lastTime = now;
 
-  // Cloud Rotation Animation - each at its own speed
+  // --- AUDIO-DRIVEN LIGHTNING ---
+  // Read thunder amplitude and boost flashPower when audio peaks
+  const thunderAmp = getThunderAmplitude();
+
+  if (thunderAmp > 0.08) {
+    // Map the audio amplitude to flash intensity
+    // Higher amplitude = brighter flash, matching cracks and rumbles
+    const audioPower = thunderAmp * thunderAmp * 800;
+    flashPower = Math.max(flashPower, audioPower);
+  }
+
+  // --- CLOUD ANIMATION ---
   cloudParticles.forEach((p) => {
     p.rotation.z -= p.userData.rotSpeed || 0.002;
 
-    // During lightning, briefly brighten clouds
     if (flashPower > 50) {
       let boost = Math.min(flashPower / 600, 0.4);
       p.material.opacity = Math.min(p.userData.baseOpacity + boost, 0.95);
     } else {
-      // Smoothly return to base opacity
       p.material.opacity += (p.userData.baseOpacity - p.material.opacity) * 0.05;
     }
   });
 
-  // RainDrop Animation - with wind and varied speed
+  // --- RAIN ANIMATION ---
   rainGeo.vertices.forEach((p) => {
     p.velocity -= (2 + Math.random() * 2) * p.speedFactor;
     p.y += p.velocity;
-    // Wind drift
     p.x += windDirection * windStrength;
 
     if (p.y < -100) {
@@ -289,7 +364,7 @@ function render() {
   rainGeo.verticesNeedUpdate = true;
   rain.rotation.y += 0.001;
 
-  // Lightning flash decay
+  // --- LIGHTNING FLASH RENDERING ---
   if (flashPower > 0.5) {
     flash.intensity = flashPower * 0.15;
     flash.power = flashPower;
@@ -297,7 +372,6 @@ function render() {
     flash2.power = flashPower * 0.6;
     ambientFlash.intensity = flashPower * 0.003;
 
-    // Screen overlay flash
     let overlayAlpha = Math.min(flashPower / 1500, 0.12);
     flashOverlay.style.background = `rgba(180, 200, 255, ${overlayAlpha})`;
 
@@ -309,12 +383,6 @@ function render() {
     flash2.power = 0;
     ambientFlash.intensity = 0;
     flashOverlay.style.background = "rgba(180, 200, 255, 0)";
-  }
-
-  // Lightning timing
-  timeSinceLastFlash += delta;
-  if (timeSinceLastFlash > nextFlashTime) {
-    triggerLightning();
   }
 
   renderer.render(scene, camera);
@@ -340,29 +408,23 @@ document.addEventListener("dblclick", () => {
   }
 });
 
-// Resize renderer and camera when entering fullscreen
 function resizeRendererToFullscreen() {
   const screenWidth = window.screen.width;
   const screenHeight = window.screen.height;
-
   renderer.setSize(screenWidth, screenHeight);
   camera.aspect = screenWidth / screenHeight;
   camera.updateProjectionMatrix();
 }
 
-// Resize renderer and camera when exiting fullscreen
 function resizeRendererToWindow() {
   const windowWidth = window.innerWidth;
   const windowHeight = window.innerHeight;
-
   renderer.setSize(windowWidth, windowHeight);
   camera.aspect = windowWidth / windowHeight;
   camera.updateProjectionMatrix();
 }
 
-// Ensure resizing works for general window resize events
 window.addEventListener("resize", resizeRendererToWindow);
-
 
 /* //////////////////////////////////////// */
 
@@ -382,7 +444,6 @@ toggleButton.style.cursor = "pointer";
 toggleButton.title = "Toggle Thunder Sounds";
 document.body.appendChild(toggleButton);
 
-// Toggle Thunder Sounds On/Off
 toggleButton.addEventListener("click", () => {
   thunderEnabled = !thunderEnabled;
   toggleButton.style.background = thunderEnabled
@@ -392,6 +453,5 @@ toggleButton.addEventListener("click", () => {
 
 /* //////////////////////////////////////// */
 
-// Fetch thunder sounds, play rain sound, and start the simulation
+// Start the simulation
 playRainSound();
-fetchThunderSounds();
