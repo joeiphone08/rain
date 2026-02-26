@@ -7,4 +7,9 @@ body {
   height: 100vh;
   margin: 0;
   overflow: hidden;
+  background: #0a0a14;
+}
+
+canvas {
+  display: block;
 }
