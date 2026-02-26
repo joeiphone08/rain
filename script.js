@@ -172,36 +172,156 @@ function getThunderAmplitude() {
 
 /* //////////////////////////////////////// */
 
-// RAIN SYSTEM - denser, with wind and varied speeds
-rainCount = 15000;
-cloudParticles = [];
-rainGeo = new THREE.Geometry();
+// RAIN STREAK TEXTURE — generated via canvas for elongated raindrop look
+function createRainTexture() {
+  const canvas = document.createElement("canvas");
+  canvas.width = 4;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d");
 
-// Wind parameters
-let windStrength = 0.3;
-let windDirection = -0.5; // slight diagonal
+  // Vertical gradient streak: bright center tapering to transparent ends
+  const gradient = ctx.createLinearGradient(0, 0, 0, 64);
+  gradient.addColorStop(0, "rgba(200, 215, 230, 0)");
+  gradient.addColorStop(0.15, "rgba(200, 215, 230, 0.2)");
+  gradient.addColorStop(0.4, "rgba(220, 230, 245, 0.8)");
+  gradient.addColorStop(0.5, "rgba(235, 240, 255, 1.0)");
+  gradient.addColorStop(0.6, "rgba(220, 230, 245, 0.8)");
+  gradient.addColorStop(0.85, "rgba(200, 215, 230, 0.2)");
+  gradient.addColorStop(1, "rgba(200, 215, 230, 0)");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, 4, 64);
 
-for (let i = 0; i < rainCount; i++) {
-  rainDrop = new THREE.Vector3(
-    Math.random() * 400 - 200,
-    Math.random() * 500 - 250,
-    Math.random() * 400 - 200
-  );
-  rainDrop.velocity = 0;
-  // Each drop gets its own fall speed multiplier for variation
-  rainDrop.speedFactor = 0.6 + Math.random() * 0.8;
-  rainGeo.vertices.push(rainDrop);
+  const tex = new THREE.Texture(canvas);
+  tex.needsUpdate = true;
+  return tex;
 }
 
-rainMaterial = new THREE.PointsMaterial({
-  color: 0xc0c8d0,
-  size: 0.15,
+const rainTexture = createRainTexture();
+
+// Splash texture — small bright dot with soft falloff
+function createSplashTexture() {
+  const canvas = document.createElement("canvas");
+  canvas.width = 32;
+  canvas.height = 32;
+  const ctx = canvas.getContext("2d");
+
+  const gradient = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+  gradient.addColorStop(0, "rgba(220, 230, 255, 1.0)");
+  gradient.addColorStop(0.3, "rgba(200, 215, 240, 0.6)");
+  gradient.addColorStop(0.7, "rgba(180, 200, 230, 0.15)");
+  gradient.addColorStop(1, "rgba(180, 200, 230, 0)");
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, 32, 32);
+
+  const tex = new THREE.Texture(canvas);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+const splashTexture = createSplashTexture();
+
+/* //////////////////////////////////////// */
+
+// RAIN SYSTEM — two depth layers for parallax realism
+cloudParticles = [];
+
+// Wind parameters — gusts vary over time
+let windBase = -0.4;
+let windGust = 0;
+let windTime = 0;
+
+// --- Foreground rain: larger, brighter, fewer drops, closer to camera ---
+const fgRainCount = 4000;
+const fgRainGeo = new THREE.Geometry();
+
+for (let i = 0; i < fgRainCount; i++) {
+  let drop = new THREE.Vector3(
+    Math.random() * 400 - 200,
+    Math.random() * 500 - 250,
+    Math.random() * 200 - 50 // closer z-range
+  );
+  drop.velocity = -(3 + Math.random() * 2); // start at near-terminal velocity
+  drop.speedFactor = 0.8 + Math.random() * 0.4;
+  drop.terminalVel = -(5 + Math.random() * 3);
+  fgRainGeo.vertices.push(drop);
+}
+
+const fgRainMaterial = new THREE.PointsMaterial({
+  map: rainTexture,
+  color: 0xd0d8e8,
+  size: 1.8,
   transparent: true,
-  opacity: 0.7,
+  opacity: 0.6,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  sizeAttenuation: true,
 });
 
-rain = new THREE.Points(rainGeo, rainMaterial);
-scene.add(rain);
+const fgRain = new THREE.Points(fgRainGeo, fgRainMaterial);
+scene.add(fgRain);
+
+// --- Background rain: smaller, dimmer, denser, farther away ---
+const bgRainCount = 14000;
+const bgRainGeo = new THREE.Geometry();
+
+for (let i = 0; i < bgRainCount; i++) {
+  let drop = new THREE.Vector3(
+    Math.random() * 600 - 300,
+    Math.random() * 500 - 250,
+    Math.random() * 400 - 300 // deeper z-range
+  );
+  drop.velocity = -(2 + Math.random() * 1.5);
+  drop.speedFactor = 0.5 + Math.random() * 0.6;
+  drop.terminalVel = -(4 + Math.random() * 2);
+  bgRainGeo.vertices.push(drop);
+}
+
+const bgRainMaterial = new THREE.PointsMaterial({
+  map: rainTexture,
+  color: 0x90a0b8,
+  size: 0.9,
+  transparent: true,
+  opacity: 0.35,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  sizeAttenuation: true,
+});
+
+const bgRain = new THREE.Points(bgRainGeo, bgRainMaterial);
+scene.add(bgRain);
+
+// --- Ground splash particles ---
+const splashCount = 800;
+const splashGeo = new THREE.Geometry();
+
+for (let i = 0; i < splashCount; i++) {
+  let splash = new THREE.Vector3(
+    Math.random() * 400 - 200,
+    -100 + Math.random() * 5, // ground level
+    Math.random() * 400 - 200
+  );
+  splash.life = 0; // 0 = inactive
+  splash.maxLife = 0.15 + Math.random() * 0.15; // ~150-300ms lifespan
+  splashGeo.vertices.push(splash);
+}
+
+const splashMaterial = new THREE.PointsMaterial({
+  map: splashTexture,
+  color: 0xb0c0d8,
+  size: 1.5,
+  transparent: true,
+  opacity: 0,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  sizeAttenuation: true,
+});
+
+const splashes = new THREE.Points(splashGeo, splashMaterial);
+scene.add(splashes);
+
+// Base opacity/color for lightning flash effect on rain
+const fgRainBaseOpacity = 0.6;
+const bgRainBaseOpacity = 0.35;
 
 /* //////////////////////////////////////// */
 
@@ -315,6 +435,19 @@ function triggerLightning() {
 
 /* //////////////////////////////////////// */
 
+// Spawn a splash at ground level when a raindrop hits
+let splashIndex = 0;
+function spawnSplash(x, z) {
+  // Only spawn some splashes (not every drop, for performance)
+  if (Math.random() > 0.08) return;
+  let p = splashGeo.vertices[splashIndex];
+  p.x = x + (Math.random() * 4 - 2);
+  p.y = -98 + Math.random() * 3;
+  p.z = z + (Math.random() * 4 - 2);
+  p.life = p.maxLife;
+  splashIndex = (splashIndex + 1) % splashCount;
+}
+
 // Track time for smooth animations
 let lastTime = performance.now();
 
@@ -338,21 +471,64 @@ function render() {
     }
   });
 
-  // RainDrop Animation - with wind and varied speed
-  rainGeo.vertices.forEach((p) => {
-    p.velocity -= (2 + Math.random() * 2) * p.speedFactor;
+  // Time-varying wind gusts
+  windTime += delta;
+  windGust = Math.sin(windTime * 0.7) * 0.3 + Math.sin(windTime * 1.9) * 0.15 + Math.sin(windTime * 0.3) * 0.5;
+  let currentWind = windBase + windGust * 0.4;
+
+  // Foreground rain animation
+  fgRainGeo.vertices.forEach((p) => {
+    // Gravity-based acceleration with terminal velocity cap
+    p.velocity -= 0.15 * p.speedFactor;
+    if (p.velocity < p.terminalVel) p.velocity = p.terminalVel;
     p.y += p.velocity;
-    // Wind drift
-    p.x += windDirection * windStrength;
+    p.x += currentWind * 0.6;
 
     if (p.y < -100) {
-      p.y = 100 + Math.random() * 50;
+      // Spawn a splash at impact point
+      spawnSplash(p.x, p.z);
+      p.y = 100 + Math.random() * 100;
       p.x = Math.random() * 400 - 200;
-      p.velocity = 0;
+      p.velocity = -(2 + Math.random() * 1.5);
     }
   });
-  rainGeo.verticesNeedUpdate = true;
-  rain.rotation.y += 0.001;
+  fgRainGeo.verticesNeedUpdate = true;
+
+  // Background rain animation
+  bgRainGeo.vertices.forEach((p) => {
+    p.velocity -= 0.1 * p.speedFactor;
+    if (p.velocity < p.terminalVel) p.velocity = p.terminalVel;
+    p.y += p.velocity;
+    p.x += currentWind * 0.35; // less wind effect at distance
+
+    if (p.y < -100) {
+      p.y = 100 + Math.random() * 100;
+      p.x = Math.random() * 600 - 300;
+      p.velocity = -(1.5 + Math.random() * 1);
+    }
+  });
+  bgRainGeo.verticesNeedUpdate = true;
+
+  // Splash particle lifecycle
+  splashGeo.vertices.forEach((p) => {
+    if (p.life > 0) {
+      p.life -= delta;
+      if (p.life <= 0) {
+        p.life = 0;
+        p.y = -200; // hide off-screen
+      } else {
+        // Expand outward slightly as splash fades
+        p.y += delta * 8;
+      }
+    }
+  });
+  splashGeo.verticesNeedUpdate = true;
+  // Splash opacity pulsed based on active splashes
+  let activeSplashes = splashGeo.vertices.filter((p) => p.life > 0).length;
+  splashMaterial.opacity = activeSplashes > 0 ? 0.5 : 0;
+
+  fgRain.rotation.y += 0.0008;
+  bgRain.rotation.y += 0.0004;
 
   // Read thunder amplitude from analyser and boost flash accordingly
   let amplitude = getThunderAmplitude();
@@ -362,13 +538,18 @@ function render() {
     flashPower = Math.max(flashPower, amplitudeBoost);
   }
 
-  // Lightning flash decay
+  // Lightning flash decay + rain brightening
   if (flashPower > 0.5) {
     flash.intensity = flashPower * 0.15;
     flash.power = flashPower;
     flash2.intensity = flashPower * 0.08;
     flash2.power = flashPower * 0.6;
     ambientFlash.intensity = flashPower * 0.003;
+
+    // Rain brightens during lightning — drops become visible streaks
+    let rainBoost = Math.min(flashPower / 400, 1.0);
+    fgRainMaterial.opacity = fgRainBaseOpacity + rainBoost * 0.4;
+    bgRainMaterial.opacity = bgRainBaseOpacity + rainBoost * 0.3;
 
     // Screen overlay flash
     let overlayAlpha = Math.min(flashPower / 1500, 0.12);
@@ -382,6 +563,10 @@ function render() {
     flash2.power = 0;
     ambientFlash.intensity = 0;
     flashOverlay.style.background = "rgba(180, 200, 255, 0)";
+
+    // Smoothly return rain to base opacity
+    fgRainMaterial.opacity += (fgRainBaseOpacity - fgRainMaterial.opacity) * 0.08;
+    bgRainMaterial.opacity += (bgRainBaseOpacity - bgRainMaterial.opacity) * 0.08;
   }
 
   // Lightning timing
