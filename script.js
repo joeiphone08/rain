@@ -14,6 +14,15 @@ camera.rotation.x = 1.16;
 camera.rotation.y = -0.12;
 camera.rotation.z = 0.27;
 
+// Camera view modes: "sky" (looking up) and "forward" (standing, looking ahead)
+let cameraView = "sky";
+const cameraViews = {
+  sky: { px: 0, py: 0, pz: 1, rx: 1.16, ry: -0.12, rz: 0.27 },
+  forward: { px: 0, py: 0, pz: 100, rx: 0.25, ry: 0, rz: 0 },
+};
+let cameraTarget = cameraViews.sky;
+const cameraLerpSpeed = 2.5; // how fast the transition is
+
 /* //////////////////////////////////////// */
 
 // RENDERER - antialiased with proper pixel ratio
@@ -457,6 +466,15 @@ function render() {
   let delta = (now - lastTime) / 1000; // seconds
   lastTime = now;
 
+  // Smooth camera transition between views
+  let lerpAmt = 1 - Math.exp(-cameraLerpSpeed * delta);
+  camera.position.x += (cameraTarget.px - camera.position.x) * lerpAmt;
+  camera.position.y += (cameraTarget.py - camera.position.y) * lerpAmt;
+  camera.position.z += (cameraTarget.pz - camera.position.z) * lerpAmt;
+  camera.rotation.x += (cameraTarget.rx - camera.rotation.x) * lerpAmt;
+  camera.rotation.y += (cameraTarget.ry - camera.rotation.y) * lerpAmt;
+  camera.rotation.z += (cameraTarget.rz - camera.rotation.z) * lerpAmt;
+
   // Cloud Rotation Animation - each at its own speed
   cloudParticles.forEach((p) => {
     p.rotation.z -= p.userData.rotSpeed || 0.002;
@@ -485,8 +503,8 @@ function render() {
     p.x += currentWind * 0.6;
 
     if (p.y < -100) {
-      // Spawn a splash at impact point
-      spawnSplash(p.x, p.z);
+      // Spawn a splash at impact point (only in forward view)
+      if (cameraView === "forward") spawnSplash(p.x, p.z);
       p.y = 100 + Math.random() * 100;
       p.x = Math.random() * 400 - 200;
       p.velocity = -(2 + Math.random() * 1.5);
